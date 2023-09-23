@@ -269,7 +269,7 @@ def print_call_node_info(node):
     print("-" * 80)
 
 
-def process_call_node(node: ast.Call, verbose: bool = False):
+def process_call_node(node: ast.Call, called_by=None, verbose: bool = False):
     """Extract function call data from a call node.
 
     Args:
@@ -304,10 +304,11 @@ def process_call_node(node: ast.Call, verbose: bool = False):
         return None
 
     # we want to avoid creating nodes for things like `some_list.append(item)`
-    # this makes it so that we aren't treating some_list like a model so the 
+    # this makes it so that we aren't treating some_list like a model so the
     # edges to this call will eventually be skipped
     if call_node.name in common_functions_to_skip:
         call_node.module = []
+    call_node.called_by = called_by
     return call_node
 
 
@@ -315,20 +316,34 @@ def process_call_node(node: ast.Call, verbose: bool = False):
 class FuncDefNode:
     name: str  # name of the function
     module: str  # what module the function belongs to
+    defined_in: str  # what module the function belongs to
     start_lineno: int  # where does the definition start
     end_lineno: int  # where does the definition stop
     calls: list  # what functions are called in the definition
 
 
-def process_func_def_node(node: ast.FunctionDef, module_name=None):
+def process_func_def_node(node: ast.FunctionDef, module_name=None, defined_in=None):
     return FuncDefNode(
         name=node.name,
         module=module_name,
+        defined_in=defined_in,
         start_lineno=node.lineno,
         end_lineno=node.end_lineno,
         calls=[],
     )
 
+@dataclass
+class ClassNode:
+    name: str
+    module: str
+    methods: list
+
+def process_class_node(node: ast.ClassDef, module_name=None, methods=None):
+    return ClassNode(
+        name=node.name,
+        module=module_name,
+        methods=methods,
+    )
 
 # TODO: may need to use this instead depending on how to handle class data
 def process_class_func_node(node: ast.FunctionDef, class_name=None):
@@ -376,12 +391,20 @@ def walk_node_children(node):
     return list(ast.walk(node))
 
 
-def process_class_node(node, func_defs, call_list, import_list):
+def process_class_function_def(node, context_name):
+    class_method_def = process_func_def_node(node, context_name, defined_in=context_name)
+    return class_method_def
+
+def process_class_methods(node):
     class_name = node.name
     class_body = node.body
+    class_methods = []
     # this should mostly be class methods
     for body_node in class_body:
-        process_node_children(body_node, class_name, func_defs, call_list, import_list)
+        if isinstance(body_node, ast.FunctionDef):
+            method = process_class_function_def(body_node, class_name)
+            class_methods.append(method)
+    return class_methods
 
 
 def process_func_def_children(
@@ -403,14 +426,16 @@ def process_func_def_children(
             # TODO: this will be a helper function, which we may want to handle differently
             # for now we just add the function name to the helper function's `.module`
             helper_function_module = func_def.module + func_def.name
-            helper_function = process_func_def_node(child, helper_function_module)
+            helper_function = process_func_def_node(child, helper_function_module, defined_in=func_def.name)
             module_func_defs.append(helper_function)
         else:
-            add_call_or_import(child, call_list, import_list)
+            if not isinstance(node, ast.Call):
+                # we no longer want to add calls to the module call list when they are called in function definitions, but
+                # we do want to continue adding imports
+                add_call_or_import(child, [], import_list)
             if isinstance(child, ast.Call):
-                call_data = process_call_node(child)
+                call_data = process_call_node(child, func_def.name)
 
-                # TODO: also apply this processing for general calls, not just calls in funcdefs
                 if not call_data.module and call_data.name not in builtin_names:
                     for import_node in import_list:
                         if call_data.name in import_node.function_names:
@@ -438,6 +463,8 @@ def process_node_children(node, context_name, func_defs, call_list, import_list)
         add_call_or_import(child, call_list, import_list)
 
 
+
+
 def parse_module_node(module_node: ast.Module, current_module_name=None, verbose=False):
     """Crawl the children of the module node and extract code structure data."""
 
@@ -450,8 +477,9 @@ def parse_module_node(module_node: ast.Module, current_module_name=None, verbose
     for node in module_body:
         if isinstance(node, ast.ClassDef):
             # we handle classes differently because we want to attach data about the class to its elements
-            class_list.append(node)
-            process_class_node(node, func_defs, call_list, import_list)
+            class_methods = process_class_methods(node)
+            class_data = process_class_node(node, methods=class_methods)
+            class_list.append(class_data)
         elif isinstance(node, ast.FunctionDef):
             function_def = process_func_def_node(node, current_module_name)
             if verbose:
@@ -599,4 +627,4 @@ def extract_node_structure_from_script(filename: str, verbose=False):
     deduplicated_import_list = manage_module_imports(import_list)
 
     # TODO: option for non-deduped call list in order to provide cleanup suggestions
-    return deduplicated_import_list, call_list, func_defs
+    return deduplicated_import_list, call_list, func_defs, class_list

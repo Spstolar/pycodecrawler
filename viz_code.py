@@ -17,7 +17,7 @@ low_level_functions = [
     "extend",
     "items",
     "keys",
-    "values"
+    "values",
 ]
 
 
@@ -48,7 +48,14 @@ def create_graph_description(module_info, collapse_multiple_call_edges: bool = F
     else:
         edges = create_function_call_edges(module_info)
     submodule_data = get_module_subgraphs(module_info)
-    non_trivial_edges = [e for e in edges if e[0] not in low_level_functions and e[1] not in low_level_functions]
+    non_trivial_edges = [
+        e
+        for e in edges
+        if e[0] not in low_level_functions and e[1] not in low_level_functions
+    ]
+    # TODO: edges from function defs
+    # TODO: edges from classes
+    # TODO: edges from class defs
     return generate_desc(non_trivial_edges, other_content=submodule_data)
 
 
@@ -133,7 +140,7 @@ def get_module_subgraphs(module):
             if not node_name:
                 update_module_name_lookup(full_node_name, module_lookup)
                 node_name = module_lookup[full_node_name]
-            
+
             # check if this call belongs to the module we are inspecting
             if (
                 c_main_module == imported_module.module
