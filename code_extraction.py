@@ -68,9 +68,12 @@ def extract_code_information(
     for f in python_filenames:
         module_name = f.stem
 
-        import_list, call_list, func_defs, class_list = extract_node_structure_from_script(
-            f, verbose=verbose
-        )
+        (
+            import_list,
+            call_list,
+            func_defs,
+            class_list,
+        ) = extract_node_structure_from_script(f, verbose=verbose)
         module_info[module_name] = {
             "import_list": import_list,
             "call_list": call_list,

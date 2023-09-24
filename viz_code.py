@@ -6,6 +6,9 @@ low_level_functions = [
     "range",
     "len",
     "max",
+    "min",
+    "sum",
+    "all",
     "open",
     "dict",
     "set",
@@ -18,19 +21,54 @@ low_level_functions = [
     "items",
     "keys",
     "values",
+    "index",
+    "map",
+    "str",
+    "enumerate",
+    "type",
+    "cls",
+    "TypeError",
+    "ValueError",
+    "tuple",
+    "reversed",
+    "zip",
+    "iter",
+    "replace",
+    "repr",
+    "join",
+    "split",
+    "KeyError",
 ]
+
+MAX_NODE_ID_LENGTH = 20
+
+
+def sanitize_node_id(original_node_id, max_length=MAX_NODE_ID_LENGTH):
+    node_id = original_node_id[:max_length]
+    if node_id in mermaid_keywords:
+        node_id = "py." + node_id
+
+    if "end" in node_id.split("_"):
+        # you can't have "end" in the flowchart https://github.com/mermaid-js/mermaid/issues/1444
+        # the fix is just just capitalize at least one of the letters of "end"
+        parts = node_id.split("_")
+        updated_parts = [part.capitalize() if "end" in part else part for part in parts]
+        node_id = "_".join(updated_parts)
+    return node_id
 
 
 def update_module_name_lookup(module_name, module_lookup_dict):
-    if len(module_name) > 20:
-        module_lookup_dict[module_name] = module_name[:20]
-    elif module_name in mermaid_keywords:
-        module_lookup_dict[module_name] = "py." + module_name
-    else:
-        module_lookup_dict[module_name] = module_name
+    node_id = sanitize_node_id(module_name)
+    module_lookup_dict[module_name] = node_id
 
 
-def create_graph_description(module_info, collapse_multiple_call_edges: bool = False):
+def create_graph_description(
+    module_info,
+    collapse_multiple_call_edges: bool = False,
+    wanted_classes: list = None,
+    include_body_commands: bool = True,
+    include_function_defs: bool = True,
+):
     """Use the parsed module info to create edges between functions defined and called
     in the module.
 
@@ -44,22 +82,33 @@ def create_graph_description(module_info, collapse_multiple_call_edges: bool = F
         list: edge data
     """
     if collapse_multiple_call_edges:
-        edges = create_collapsed_function_call_edges(module_info)
+        edges = create_collapsed_function_call_edges(
+            module_info,
+            wanted_classes=wanted_classes,
+            include_body_commands=include_body_commands,
+            include_function_defs=include_function_defs,
+        )
     else:
-        edges = create_function_call_edges(module_info)
+        edges = create_function_call_edges(
+            module_info,
+            wanted_classes=wanted_classes,
+            include_body_commands=include_body_commands,
+            include_function_defs=include_function_defs,
+        )
+
+    # TODO: propagate this up
+    class_data = get_class_subgraphs(module_info, wanted_classes=wanted_classes)
     submodule_data = get_module_subgraphs(module_info)
     non_trivial_edges = [
         e
         for e in edges
-        if e[0] not in low_level_functions and e[1] not in low_level_functions
+        if e[1]
+        not in low_level_functions  # we will keep the edge if the source has a low-level name because it could be defining something common for a class, otherwise we exclude edges with low-level target names to reduce clutter
     ]
-    # TODO: edges from function defs
-    # TODO: edges from classes
-    # TODO: edges from class defs
-    return generate_desc(non_trivial_edges, other_content=submodule_data)
+    return generate_desc(non_trivial_edges, other_content=[class_data, submodule_data])
 
 
-def generate_desc(import_graph_edges: list, other_content: str = None):
+def generate_desc(import_graph_edges: list, other_content: list = None):
     contents = []
     header = "```{mermaid}"
     figure_type = "graph LR;"
@@ -98,7 +147,7 @@ def generate_desc(import_graph_edges: list, other_content: str = None):
         contents.append(edge_line)
 
     if other_content:
-        contents.append(other_content)
+        contents.extend(other_content)
     contents.append(footer)
     return "\n".join(contents)
 
@@ -111,15 +160,43 @@ def get_subgraph_header(imported_module):
     return header
 
 
+def get_class_subgraphs(module, wanted_classes: list):
+    class_list = module["class_list"]
+    class_subgraphs = []
+    for class_node in class_list:
+        class_name = class_node.name
+        if wanted_classes is not None and class_name not in wanted_classes:
+            continue
+
+        header = f"subgraph {class_node.name}"
+
+        class_subgraph_methods = []
+        for method in class_node.methods:
+            node_id = f"{class_name}.{method.name}"
+            node_id = sanitize_node_id(node_id)
+            class_subgraph_methods.append("\t" + node_id)
+        methods = "\n".join(class_subgraph_methods)
+        footer = "end"
+        class_subgraphs.append("\n".join([header, methods, footer]))
+    return "\n".join(class_subgraphs)
+
+
 def get_module_subgraphs(module):
     module_subgraphs = []
     collected = []
     module_lookup = {}
     module_import_list = module["import_list"]
+    call_list = module["call_list"]
+    function_call_list = [c for f in module["func_defs"] for c in f.calls]
+    if not call_list:
+        call_list = []
+    if not function_call_list:
+        function_call_list = []
+    call_list.extend(function_call_list)
     for imported_module in module_import_list:
         header = get_subgraph_header(imported_module)
         functions = []
-        for c in module["call_list"]:
+        for c in call_list:
             if c in collected:
                 continue
             # collected.append(c)  # need to handle this better

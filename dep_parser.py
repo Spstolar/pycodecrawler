@@ -2,7 +2,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from collections import defaultdict
 import ast
-import inspect
 
 
 common_functions_to_skip = [
@@ -332,11 +331,13 @@ def process_func_def_node(node: ast.FunctionDef, module_name=None, defined_in=No
         calls=[],
     )
 
+
 @dataclass
 class ClassNode:
     name: str
     module: str
     methods: list
+
 
 def process_class_node(node: ast.ClassDef, module_name=None, methods=None):
     return ClassNode(
@@ -344,6 +345,7 @@ def process_class_node(node: ast.ClassDef, module_name=None, methods=None):
         module=module_name,
         methods=methods,
     )
+
 
 # TODO: may need to use this instead depending on how to handle class data
 def process_class_func_node(node: ast.FunctionDef, class_name=None):
@@ -354,6 +356,21 @@ def process_class_func_node(node: ast.FunctionDef, class_name=None):
         end_lineno=node.end_lineno,
         calls=[],
     )
+
+
+def add_import(node, import_list):
+    """Determine if the note is an import or call, parse, and add to the
+    corresponding list.
+
+    Args:
+        node (ast.AST): node to parse
+        call_list (list): list of call data
+        import_list (list): list of import data
+    """
+    if isinstance(node, ast.Import):
+        import_list.append(process_import_node(node))
+    elif isinstance(node, ast.ImportFrom):
+        import_list.append(process_from_import_node(node))
 
 
 def add_call_or_import(node, call_list, import_list):
@@ -391,20 +408,73 @@ def walk_node_children(node):
     return list(ast.walk(node))
 
 
-def process_class_function_def(node, context_name):
-    class_method_def = process_func_def_node(node, context_name, defined_in=context_name)
+def process_class_function_def(node, context_name, class_names: list = None):
+    class_method_def = process_func_def_node(
+        node, context_name, defined_in=context_name
+    )
+    process_func_def_children(
+        node,
+        class_method_def,
+        class_names=class_names,
+        module_func_defs=[],
+        call_list=class_method_def.calls,
+        import_list=[],
+    )
     return class_method_def
 
-def process_class_methods(node):
+
+def process_class_methods(node, class_names: list = None):
+    """Process all function definitions inside class and return the FunctionDefs in a list."""
     class_name = node.name
     class_body = node.body
     class_methods = []
     # this should mostly be class methods
     for body_node in class_body:
         if isinstance(body_node, ast.FunctionDef):
-            method = process_class_function_def(body_node, class_name)
+            method = process_class_function_def(body_node, class_name, class_names)
             class_methods.append(method)
     return class_methods
+
+
+def get_instantiated_object_name(node, sibling_list):
+    try:
+        node_index = sibling_list.index(node)
+        assignment = sibling_list[node_index - 2]
+        assignment_target = assignment.targets[0]
+        if isinstance(assignment_target, ast.Name):
+            return assignment_target.id
+        elif isinstance(assignment_target, ast.Attribute):
+            target_id = assignment_target.value.id
+            target_attr = assignment_target.attr
+            return f"{target_id}.{target_attr}"
+    except:
+        return None
+
+
+def update_call_data_for_object_info(
+    node: ast.Call,
+    node_siblings: list,
+    call_data: CallNode,
+    class_names: list = None,
+    objects: dict = None,
+):
+    module_name = ".".join(call_data.module)
+
+    if class_names is None:
+        class_names = []
+    if objects is None:
+        objects = {}
+
+    if call_data.name in class_names:
+        object_name = get_instantiated_object_name(node, node_siblings)
+        if object_name is not None:
+            objects[object_name] = call_data.name
+        call_data.name = (
+            call_data.name + ".__init__"
+        )  # we have to assume normal instantiation
+    elif module_name in objects:
+        call_data.module = [objects[module_name]]
+    return call_data
 
 
 def process_func_def_children(
@@ -413,6 +483,7 @@ def process_func_def_children(
     module_func_defs: list,
     call_list: list,
     import_list: list,
+    class_names: list = None,
 ):
     # we have already parsed the top level function def node, so we use walk on each node in the
     # body and combine them to get all of the children. It is likely easier to do walk_node_children[1:]
@@ -421,20 +492,30 @@ def process_func_def_children(
     node_children = [
         grandchild for child in node.body for grandchild in walk_node_children(child)
     ]
+    if class_names is None:
+        class_names = []
+    objects = {}
     for child in node_children:
         if isinstance(child, ast.FunctionDef):
             # TODO: this will be a helper function, which we may want to handle differently
-            # for now we just add the function name to the helper function's `.module`
+            # for now we just add the function name to the helper function's `.module` and do not worry about process its interior
             helper_function_module = func_def.module + func_def.name
-            helper_function = process_func_def_node(child, helper_function_module, defined_in=func_def.name)
+            helper_function = process_func_def_node(
+                child, helper_function_module, defined_in=func_def.name
+            )
             module_func_defs.append(helper_function)
         else:
             if not isinstance(node, ast.Call):
-                # we no longer want to add calls to the module call list when they are called in function definitions, but
-                # we do want to continue adding imports
-                add_call_or_import(child, [], import_list)
+                add_import(child, import_list)
             if isinstance(child, ast.Call):
                 call_data = process_call_node(child, func_def.name)
+                call_data = update_call_data_for_object_info(
+                    node=child,
+                    call_data=call_data,
+                    node_siblings=node_children,
+                    class_names=class_names,
+                    objects=objects,
+                )
 
                 if not call_data.module and call_data.name not in builtin_names:
                     for import_node in import_list:
@@ -444,7 +525,15 @@ def process_func_def_children(
                 func_def.calls.append(call_data)
 
 
-def process_node_children(node, context_name, func_defs, call_list, import_list):
+def process_script_work(
+    node,
+    context_name,
+    func_defs,
+    call_list,
+    import_list,
+    class_names: list = None,
+    objects: list = None,
+):
     """Walk all children of the node and process them.
 
     Args:
@@ -454,15 +543,25 @@ def process_node_children(node, context_name, func_defs, call_list, import_list)
         call_list (list): calls
         import_list (list): imports
     """
+    # TODO: clean this up because we've eliminate basically everything but assignments
     # context_name - either the current module name or the class name
     node_children = walk_node_children(node)
-    if isinstance(node, ast.FunctionDef):
-        func_defs.append(process_func_def_node(node, context_name))
-        # TODO: handle the children of the node and avoid duplicating their parsing next
     for child in node_children:
-        add_call_or_import(child, call_list, import_list)
-
-
+        if isinstance(child, ast.Call):
+            call_data = process_call_node(child)
+            call_data = update_call_data_for_object_info(
+                node=child,
+                call_data=call_data,
+                node_siblings=node_children,
+                class_names=class_names,
+                objects=objects,
+            )
+            if not call_data.module and call_data.name not in builtin_names:
+                for import_node in import_list:
+                    if call_data.name in import_node.function_names:
+                        call_data.module = [import_node.module]
+                        break
+            call_list.append(call_data)
 
 
 def parse_module_node(module_node: ast.Module, current_module_name=None, verbose=False):
@@ -474,32 +573,50 @@ def parse_module_node(module_node: ast.Module, current_module_name=None, verbose
     call_list = []
 
     module_body = module_node.body
-    for node in module_body:
-        if isinstance(node, ast.ClassDef):
-            # we handle classes differently because we want to attach data about the class to its elements
-            class_methods = process_class_methods(node)
-            class_data = process_class_node(node, methods=class_methods)
-            class_list.append(class_data)
-        elif isinstance(node, ast.FunctionDef):
+    # we handle classes differently because we want to attach data about the class to its elements
+    class_nodes = [n for n in module_body if isinstance(n, ast.ClassDef)]
+    other_module_nodes = [n for n in module_body if not isinstance(n, ast.ClassDef)]
+
+    # we parse all classes first because we want to identify when we make calls from objects
+    class_names = []
+    # make a first pass to get all of the module names, we want to capture when we have inter-module calls
+    for class_node in class_nodes:
+        class_names.append(class_node.name)
+    for class_node in class_nodes:
+        # TODO: we may have some imports inside classes, so will need to handle that, not high priority though
+        class_methods = process_class_methods(class_node, class_names=class_names)
+        class_data = process_class_node(class_node, methods=class_methods)
+        class_list.append(class_data)
+
+    script_objects = (
+        {}
+    )  # keeping track of objects instantiated by the script (instead of in function definitions)
+    for node in other_module_nodes:
+        if isinstance(node, ast.FunctionDef):
             function_def = process_func_def_node(node, current_module_name)
             if verbose:
                 print("Function definition:", function_def.name)
             process_func_def_children(
-                node,
-                function_def,
+                node=node,
+                func_def=function_def,
                 module_func_defs=func_defs,
                 call_list=call_list,
                 import_list=import_list,
+                class_names=class_names,
             )
             func_defs.append(function_def)
+        elif isinstance(node, ast.Import) or isinstance(node, ast.ImportFrom):
+            add_import(node, import_list)
         else:
-            # otherwise, this should be an import or a function definition, unless there is work performed in the script
-            process_node_children(
+            # otherwise, this should be work performed in the script
+            process_script_work(
                 node,
                 current_module_name,
                 func_defs=func_defs,
                 call_list=call_list,
                 import_list=import_list,
+                class_names=class_names,
+                objects=script_objects,
             )
 
     return import_list, call_list, func_defs, class_list
