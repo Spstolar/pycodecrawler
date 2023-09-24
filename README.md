@@ -1,4 +1,4 @@
-# `pycodecrawler`
+# `pygraphcrawler`
 
 Parse Python code and create Mermaid markdown descriptions of its function dependency graph.
 
