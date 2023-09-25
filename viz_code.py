@@ -42,8 +42,16 @@ low_level_functions = [
 
 MAX_NODE_ID_LENGTH = 20
 
-
 def sanitize_node_id(original_node_id, max_length=MAX_NODE_ID_LENGTH):
+    """Sanitize a node id to make it mermaid compatible.
+
+    Args:
+        original_node_id (str): the original node id
+        max_length (int, optional): the maximum length of the node id. Defaults to MAX_NODE_ID_LENGTH.
+
+    Returns:
+        str: the sanitized node id
+    """
     node_id = original_node_id[:max_length]
     if node_id in mermaid_keywords:
         node_id = "py." + node_id
@@ -58,19 +66,26 @@ def sanitize_node_id(original_node_id, max_length=MAX_NODE_ID_LENGTH):
 
 
 def update_module_name_lookup(module_name, module_lookup_dict):
+    """Update the module name lookup dictionary with the module name and a sanitized node id.
+
+    Args:
+        module_name (str): the module name
+        module_lookup_dict (dict): the module name lookup dictionary
+    """
     node_id = sanitize_node_id(module_name)
     module_lookup_dict[module_name] = node_id
 
 
 def create_graph_description(
-    module_info,
+    module_info: dict,
     collapse_multiple_call_edges: bool = False,
     wanted_classes: list = None,
     include_body_commands: bool = True,
     include_function_defs: bool = True,
 ):
     """Use the parsed module info to create edges between functions defined and called
-    in the module.
+    in the module. This creates a graph description that can be used to generate a
+    mermaid graph.
 
     Args:
         module_info (dict): module info parsed with dep_parser
@@ -109,6 +124,15 @@ def create_graph_description(
 
 
 def generate_desc(import_graph_edges: list, other_content: list = None):
+    """Generate a mermaid graph description from the import graph edges.
+
+    Args:
+        import_graph_edges (list): the import graph edges
+        other_content (list, optional): a list of other content as strings to add to the graph description. Defaults to None.
+
+    Returns:
+        str: the mermaid graph description
+    """
     contents = []
     header = "```{mermaid}"
     figure_type = "graph LR;"
@@ -153,6 +177,14 @@ def generate_desc(import_graph_edges: list, other_content: list = None):
 
 
 def get_subgraph_header(imported_module):
+    """Get the subgraph header for a module.
+
+    Args:
+        imported_module (ImportedModule): the imported module object
+
+    Returns:
+        str: the header for the subgraph description
+    """
     if imported_module.alias:
         header = f"subgraph {imported_module.alias}"
     else:
@@ -161,6 +193,15 @@ def get_subgraph_header(imported_module):
 
 
 def get_class_subgraphs(module, wanted_classes: list):
+    """Get the class subgraph descriptions for a module.
+
+    Args:
+        module (dict): the module info
+        wanted_classes (list): a list of the names of the classes to include in the graph
+
+    Returns:
+        str: the class subgraph descriptions
+    """
     class_list = module["class_list"]
     class_subgraphs = []
     for class_node in class_list:
@@ -182,6 +223,14 @@ def get_class_subgraphs(module, wanted_classes: list):
 
 
 def get_module_subgraphs(module):
+    """Get the module import subgraph descriptions for a module.
+
+    Args:
+        module (dict): module info parsed with dep_parser
+
+    Returns:
+        str: descriptions of the imported module subgraphs
+    """
     module_subgraphs = []
     collected = []
     module_lookup = {}
@@ -233,3 +282,4 @@ def get_module_subgraphs(module):
         if functions:
             module_subgraphs.append("\n".join([header, *functions, footer]))
     return "\n".join(module_subgraphs)
+
